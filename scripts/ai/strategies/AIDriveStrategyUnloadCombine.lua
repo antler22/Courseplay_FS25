@@ -2181,6 +2181,22 @@ function AIDriveStrategyUnloadCombine:unloadMovingCombine()
     -- PPC off-track check for the duration (5000 ms >> any realistic frame interval).
     if combineStrategy.isManualProxy then
         self.ppc:disableStopWhenOffTrack(5000)
+        -- Refresh the placeholder course when we are near the end so the PPC never runs
+        -- off the edge. driveBesideCombine() handles all actual steering; the course only
+        -- exists to keep PPC position-tracking valid.
+        local wpCount = self.followCourse:getNumberOfWaypoints()
+        if self.course:getCurrentWaypointIx() >= wpCount - 2 then
+            local cX, _, cZ = getWorldTranslation(self.combineToUnload:getAIDirectionNode())
+            local fX, _, fZ = localToWorld(self.combineToUnload:getAIDirectionNode(), 0, 0, 100)
+            local refreshed = Course.createFromTwoWorldPositions(
+                    self.vehicle, cX, cZ, fX, fZ, 0, 0, 0, 10, false)
+            if refreshed then
+                refreshed:setOffset(self.followingCourseOffset, 0)
+                self.followCourse = refreshed
+                self:startCourse(self.followCourse, 1)
+                self:debug('Manual combine: refreshed placeholder follow course')
+            end
+        end
         self:debugSparse('unloadMovingCombine (manual): isDischarging=%s',
                 tostring(combineStrategy:isDischarging()))
         return gx, gz
