@@ -58,9 +58,6 @@ PurePursuitController = CpObject()
 --- if the vehicle is more than cutOutDistanceLimit meters from the current segment's endpoints, cut-out the
 --- controller to stop. Some error must have caused us to wander way off-track, unlikely to recover.
 PurePursuitController.cutOutDistanceLimit = 50
---- Minimum time (ms) the vehicle must be continuously off-track before CP shuts it down.
---- Absorbs brief excursions during turns, terrain bumps, and placeholder-course drift.
-PurePursuitController.offTrackGracePeriodMs = 5000
 
 -- constructor
 function PurePursuitController:init(vehicle)
@@ -95,8 +92,6 @@ function PurePursuitController:init(vehicle)
     self.waypointChangeListeners = {}
     -- enable/disable stopping the vehicle when it is off-track (too far away from any waypoint)
     self.stopWhenOffTrack = CpTemporaryObject(true)
-    -- timestamp when the vehicle first entered the off-track shutdown zone (nil = not in zone)
-    self.offTrackShutdownSince = nil
 end
 
 -- destructor
@@ -529,14 +524,9 @@ function PurePursuitController:findGoalPoint()
                 self:setCurrentWaypoint(ix + 1)
             end
             if (q1 > self.cutOutDistanceLimit) and (q2 > self.cutOutDistanceLimit) and self.stopWhenOffTrack:get() then
-                self.offTrackShutdownSince = self.offTrackShutdownSince or g_time
-                if (g_time - self.offTrackShutdownSince) >= self.offTrackGracePeriodMs then
-                    CpUtil.infoVehicle(self.vehicle, 'vehicle off track, shutting off Courseplay now.')
-                    self.vehicle:stopCurrentAIJob(AIMessageCpError.new())
-                    return
-                end
-            else
-                self.offTrackShutdownSince = nil
+                CpUtil.infoVehicle(self.vehicle, 'vehicle off track, shutting off Courseplay now.')
+                self.vehicle:stopCurrentAIJob(AIMessageCpError.new())
+                return
             end
             break
         end
@@ -546,7 +536,6 @@ function PurePursuitController:findGoalPoint()
         -- the reference node is already beyond the direction switch waypoint. We should not skip that being
         -- the current waypoint otherwise the relevant waypoint won't be moved over the direction switch
         if self.course:switchingDirectionAt(ix) then
-            self.offTrackShutdownSince = nil
             -- force waypoint change
             self:showGoalpointDiag(100, 'switching direction while looking for goal point, ix=%d', ix)
             self.wpBeforeGoalPointIx = ix - 1

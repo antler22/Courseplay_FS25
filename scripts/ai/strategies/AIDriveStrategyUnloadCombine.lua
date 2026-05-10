@@ -1974,8 +1974,8 @@ function AIDriveStrategyUnloadCombine:driveToCombine()
 
     -- For manually-driven combines only: if the combine has moved significantly since the
     -- approach course was generated, re-pathfind to its new position so we don't drive to
-    -- an empty spot. CP combines use their own rendezvous/waypoint system and do not need
-    -- (or want) this extra re-dispatch.
+    -- an empty spot. CP combines use their own rendezvous/waypoint system and must not be
+    -- affected by this extra re-dispatch.
     -- Guards keep this infrequent and fast:
     --   • only check every 5 s (cheap distance math)
     --   • skip if remaining course < 20 m (almost there — let proximity handling finish)
@@ -2152,20 +2152,6 @@ function AIDriveStrategyUnloadCombine:unloadMovingCombine()
     -- Stay under the pipe until the proxy's isUnloadFinished() fires (pipe closed for 2s)
     -- or the grain cart's own trailer fills up (handled by changeToUnloadWhenTrailerFull above).
     if combineStrategy.isManualProxy then
-        -- Refresh the placeholder course when we are near the end so the PPC never runs
-        -- off the edge. driveBesideCombine() handles all actual steering; the course only
-        -- exists to keep PPC position-tracking valid.
-        local wpCount = self.followCourse:getNumberOfWaypoints()
-        if self.course:getCurrentWaypointIx() >= wpCount - 2 then
-            local refreshed = Course.createStraightForwardCourse(self.combineToUnload, 100, 0,
-                    self.combineToUnload:getAIDirectionNode())
-            if refreshed then
-                refreshed:setOffset(self.followingCourseOffset, 0)
-                self.followCourse = refreshed
-                self:startCourse(self.followCourse, 1)
-                self:debug('Manual combine: refreshed placeholder follow course')
-            end
-        end
         self:debugSparse('unloadMovingCombine (manual): isDischarging=%s',
                 tostring(combineStrategy:isDischarging()))
         return gx, gz
