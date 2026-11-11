@@ -62,6 +62,16 @@ function CpManualCombineProxy:update(dt)
         self:refreshDynamicCourse()
     end
     self:callUnloaderWhenNeeded()
+    -- The placeholder follow course is static and the unloader will drift from it
+    -- as the combine moves, so disable the PPC off-track shutdown continuously.
+    local unloaderVehicle = self.unloader:get()
+    if unloaderVehicle and unloaderVehicle.getCpDriveStrategy then
+        local strategy = unloaderVehicle:getCpDriveStrategy()
+        local ppc = strategy and strategy:getPPC()
+        if ppc then
+            ppc:disableStopWhenOffTrack(5000)
+        end
+    end
 end
 
 ------------------------------------------------------------------------------------------------------------------------

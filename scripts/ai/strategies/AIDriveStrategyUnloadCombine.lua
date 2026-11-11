@@ -213,6 +213,9 @@ function AIDriveStrategyUnloadCombine:init(task, job)
     self.vehicleInFrontOfUS = CpTemporaryObject()
     self.vehicleRequestingBackUp = CpTemporaryObject()
     self.driveUnloadNowRequested = CpTemporaryObject(false)
+    -- Sticky flag: true for the entire lifetime of a manual-combine unload job so the
+    -- off-track guard in update() stays active even after the proxy is deleted on release.
+    self.servingManualCombine = false
     self.movingAwayDelay = CpTemporaryObject(false)
     self.checkForTrailerToUnloadTo = CpTemporaryObject(true)
     self.unloadTargetType = self.UNLOAD_TYPES.COMBINE
@@ -390,14 +393,6 @@ end
 function AIDriveStrategyUnloadCombine:getDriveData(dt, vX, vY, vZ)
     self:updateLowFrequencyImplementControllers()
 
-    -- While a manual-combine proxy is our target, disable the PPC off-track shutdown continuously.
-    -- The placeholder follow course is static and the cart will drift from it as the combine moves,
-    -- so the off-track check would otherwise stop the job. The timeout (5000 ms) is much larger
-    -- than any realistic frame interval, so as long as this runs every frame the check stays off.
-    if self:isManualCombine() then
-        self.ppc:disableStopWhenOffTrack(5000)
-    end
-
     -- if applicable, calculate on which side of an auto aim pipe we should be driving, once every loop
     self:calculateAutoAimPipeOffsetX(self.combineToUnload)
 
@@ -484,7 +479,9 @@ function AIDriveStrategyUnloadCombine:getDriveData(dt, vX, vY, vZ)
 
     elseif self.state == self.states.DRIVING_TO_COMBINE then
 
-        self:driveToCombine()
+        if not self:checkCombineRelocatedAndRepath() then
+            self:driveToCombine()
+        end
 
     elseif self.state == self.states.DRIVING_TO_MOVING_COMBINE then
 
@@ -1226,6 +1223,7 @@ function AIDriveStrategyUnloadCombine:releaseCombine()
         self.combineJustUnloaded = self.combineToUnload
     end
     self.combineToUnload = nil
+    self.servingManualCombine = false
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -1580,12 +1578,9 @@ function AIDriveStrategyUnloadCombine:onPathfindingDoneToWaitingCombine(controll
         self:debug('Pathfinding to waiting combine successful')
         course:adjustForReversing(math.max(1, -AIUtil.getDirectionNodeToReverserNodeOffset(self.vehicle)))
         self:startCourse(course, 1)
-        -- Record the combine's position now so driveToCombine() can detect if it has moved
-        -- significantly and needs a re-path. Also reset the check timer so the first periodic
-        -- check fires 5 s after we start driving, not immediately.
-        local cX, _, cZ = getWorldTranslation(self:getPipeOffsetReferenceNode())
-        self.combinePositionAtApproachStart = { x = cX, z = cZ }
-        self.lastCombinePositionCheckTime = g_time
+        -- Clear the approach-start snapshot so checkCombineRelocatedAndRepath() takes a
+        -- fresh baseline on the very first tick of the new DRIVING_TO_COMBINE phase.
+        self.combinePositionAtApproachStart = nil
         self:setNewState(self.states.DRIVING_TO_COMBINE)
         return true
     else
@@ -1726,6 +1721,7 @@ end
 ---@return boolean true if the unloader has accepted the request
 function AIDriveStrategyUnloadCombine:call(combine, waypoint)
     self.combineToUnload = combine
+    self.servingManualCombine = combine.cpGetManualCombineProxy ~= nil
     local xOffset, zOffset = self:getPipeOffset(combine)
     if waypoint then
         -- combine set up a rendezvous waypoint for us, go there
@@ -1977,14 +1973,23 @@ end
 ---@return boolean true when a re-path was triggered (caller should return immediately)
 function AIDriveStrategyUnloadCombine:checkCombineRelocatedAndRepath()
     if not self:isManualCombine() then return false end
-    if g_time - (self.lastCombinePositionCheckTime or 0) <= 5000 then return false end
+    -- Lazy init: capture the combine's position on the first tick after a new approach
+    -- course starts (onPathfindingDoneToWaitingCombine clears this to trigger re-init).
+    -- Also starts the 5 s check timer so the first real check fires 5 s into driving.
+    if not self.combinePositionAtApproachStart then
+        local cX, _, cZ = getWorldTranslation(self:getPipeOffsetReferenceNode())
+        self.combinePositionAtApproachStart = { x = cX, z = cZ }
+        self.lastCombinePositionCheckTime = g_time
+        return false
+    end
+    if g_time - self.lastCombinePositionCheckTime <= 5000 then return false end
     self.lastCombinePositionCheckTime = g_time
     local remainingDist = self.course:getDistanceToLastWaypoint(self.course:getCurrentWaypointIx())
     local distToCombine = self:getDistanceFromCombine()
     if remainingDist <= 20 or distToCombine <= 25 then return false end
     local cX, _, cZ = getWorldTranslation(self:getPipeOffsetReferenceNode())
-    local lastX = self.combinePositionAtApproachStart and self.combinePositionAtApproachStart.x or cX
-    local lastZ = self.combinePositionAtApproachStart and self.combinePositionAtApproachStart.z or cZ
+    local lastX = self.combinePositionAtApproachStart.x
+    local lastZ = self.combinePositionAtApproachStart.z
     if MathUtil.vector2Length(cX - lastX, cZ - lastZ) < 30 then return false end
     local xOffset, zOffset = self:getPipeOffset(self.combineToUnload)
     zOffset = -self:getCombinesMeasuredBackDistance() - 3
@@ -2015,8 +2020,6 @@ function AIDriveStrategyUnloadCombine:driveToCombine()
     self:setFieldSpeed()
 
     self:getCombineStrategy():reconfirmRendezvous()
-
-    if self:checkCombineRelocatedAndRepath() then return end
 
     -- towards the end of the course we start checking if we can already switch to unload
     if self.course:getDistanceToLastWaypoint(self.course:getCurrentWaypointIx()) < 15 and
@@ -3171,6 +3174,13 @@ function AIDriveStrategyUnloadCombine:debug(...)
 end
 
 function AIDriveStrategyUnloadCombine:update(dt)
+    -- Must run before AIDriveStrategyCourse.update() because that calls ppc:update() which
+    -- contains the off-track cutout check. Use the sticky servingManualCombine flag rather
+    -- than isManualCombine() so the disable stays active even after the proxy is deleted
+    -- when the player releases the unloader — preventing a late cutout during job wind-down.
+    if self.servingManualCombine then
+        self.ppc:disableStopWhenOffTrack(2000)
+    end
     AIDriveStrategyCourse.update(self)
     if CpUtil.isVehicleDebugActive(self.vehicle) and CpDebug:isChannelActive(self.debugChannel) then
         if self.course then
